@@ -352,9 +352,32 @@ function openid_connect_save_userinfo($account, $userinfo) {
       array('%property' => $property_name, '%claim' => $claim), WATCHDOG_DEBUG);
 
     // map claim value into user account if it exists, otherwise continue
-    if ($claim && isset($userinfo[$claim])) {
+    if ($claim) {
+      // Support 2-layer nested claims using dot notation (e.g., "address.country")
+      if (strpos($claim, '.') !== FALSE) {
+
+        list($parent, $child) = explode('.', $claim, 2);
+
+        watchdog('openid_connect', 'Claim Parent: %parent, Claim Child: %child', 
+          array('%parent' => $parent, '%child' => $child), WATCHDOG_DEBUG);
+
+        // When handling state, set to NULL if country is NOT US
+        if ($child === 'region' 
+            && isset($userinfo['address']['country'])
+            && $userinfo['address']['country'] !== 'United States') {
+          $claim_value = NULL;
+        } else {
+          $claim_value = isset($userinfo[$parent][$child]) ? $userinfo[$parent][$child] : NULL;
+          watchdog('openid_connect', 'Claim value: %claim', 
+            array('%claim' => $claim_value), WATCHDOG_DEBUG);
+        }
+      } else {
+        $claim_value = isset($userinfo[$claim]) ? $userinfo[$claim] : NULL;
+        watchdog('openid_connect', 'Claim value: %claim', 
+            array('%claim' => $claim_value), WATCHDOG_DEBUG);
+      }
       try {
-        $account_wrapper->{$property_name} = $userinfo[$claim];
+        $account_wrapper->{$property_name} = $claim_value;
       }
       catch (EntityMetadataWrapperException $e) {
         watchdog_exception('openid_connect', $e);
@@ -644,6 +667,11 @@ function openid_connect_create_user($sub, $userinfo, $client_name) {
 
     // Get field mappings from configuration
     $config = config('openid_connect.settings');
+
+    $config_data = $config->get();
+
+    watchdog('openid_connect', 'Full config: @config', 
+      array('@config' => print_r($config_data, TRUE)), WATCHDOG_DEBUG);
   
     // Get all field instances for user entity
     $instances = field_info_instances('user', 'user');
@@ -653,14 +681,28 @@ function openid_connect_create_user($sub, $userinfo, $client_name) {
       
       // checks the config of mappings set by site admin
       $claim = $config->get('openid_connect_userinfo_mapping_property_' . $field_name);
-      if ($claim && isset($userinfo[$claim])) {
-        $fields[$field_name][LANGUAGE_NONE][0]['value'] = $userinfo[$claim];
-        watchdog('openid_connect', 'Mapped claim %claim to field %field with value: %value', 
-          array(
-            '%claim' => $claim,
-            '%field' => $field_name,
-            '%value' => $userinfo[$claim]
-          ), WATCHDOG_DEBUG);
+
+      watchdog('openid_connect', 'Potential claim: @claim', array('@claim' => print_r($claim, TRUE)), WATCHDOG_DEBUG);
+
+      if ($claim) {
+        // Support 2-layer nested claims using dot notation (e.g., "address.country")
+        if (strpos($claim, '.') !== FALSE) {
+          list($parent, $child) = explode('.', $claim, 2);
+          $claim_value = isset($userinfo[$parent][$child]) ? $userinfo[$parent][$child] : NULL;
+        }
+        else {
+          $claim_value = isset($userinfo[$claim]) ? $userinfo[$claim] : NULL;
+        }
+        
+        if ($claim_value !== NULL) {
+          $fields[$field_name][LANGUAGE_NONE][0]['value'] = $claim_value;
+          watchdog('openid_connect', 'Mapped claim %claim to field %field with value: %value', 
+            array(
+              '%claim' => $claim,
+              '%field' => $field_name,
+              '%value' => $claim_value
+            ), WATCHDOG_DEBUG);
+        }
       }
     }
 
@@ -988,6 +1030,12 @@ function openid_connect_claims() {
     'name' => array(
       'scope' => 'profile',
     ),
+    'given_name' => array(
+      'scope' => 'profile',
+    ),
+    'family_name' => array(
+      'scope' => 'profile',
+    ),
     'middle_name' => array(
       'scope' => 'profile',
     ),
@@ -1027,9 +1075,27 @@ function openid_connect_claims() {
     'email_verified' => array(
       'scope' => 'email',
     ),
-    'address' => array(
+
+    /*
+     * address info
+     */
+    'address.street_address' => array(
       'scope' => 'address',
     ),
+    'address.locality' => array(
+      'scope' => 'address',
+    ),
+    // this is state by U.S. standards
+    'address.region' => array(
+      'scope' => 'address',
+    ),
+    'address.postal_code' => array(
+      'scope' => 'address',
+    ),
+    'address.country' => array(
+      'scope' => 'address',
+    ),
+
     'phone_number' => array(
       'scope' => 'phone',
     ),
@@ -1089,6 +1155,8 @@ function _openid_connect_user_properties_to_skip() {
     'roles',
     'status',
     'theme',
+    'field_userclaim',
+    'field_country_and_state',
   );
   return backdrop_map_assoc($properties_to_skip);
 }
